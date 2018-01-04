@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <memory.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <time.h>
 
@@ -38,7 +39,6 @@ typedef struct {
 } parameters;
 
 
-extern int errno;
 
 void game_identifier(unsigned char *inbuf, parameters *p)
 {
