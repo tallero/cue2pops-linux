@@ -2,144 +2,131 @@
 	Last modified : 2013/05/16
 */
 
+//note that I remove that "pause" part, so it can be used inside Linux environment without issues.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <memory.h>
-#include <errno.h>
 #include <inttypes.h>
 #include <time.h>
 
-#ifdef DEBUG
-  const int debug = 1;
-#else
-  const int debug = 0;
-#endif
+int debug = 0;			// Else than zero, printf some dbg stuff
+int batch = 0;			// Else than zero, user prompt is disabled and CDRWIN image fix is ENABLED. Doesn't halt on anything. Suitable for batch execution.
 
-const int SECTORSIZE = 2352; // Sector size
-const int HEADERSIZE = 0x100000; // POPS header size. Also used as buffer size for caching BIN data in file output operations
-
-int pregap_count = 0; // Number of "PREGAP" occurrences in the cue
+FILE *file, *leech; //file is used for opening the input cue and the output file, leech is used for opening the BIN that's attached to the cue.
+char *dumpaddr; // name/path of the BIN that is attached to the cue. Handled by the parser then altered if it doesn't contain the full path.
+int sectorsize = 0; // Sector size
+int gap_ptr = 0; // Indicates the location of the current INDEX 00 entry in the cue sheet
+int vmode = 0; // User command status (vmode)
+int gap_more = 0; // User command status (gap++)
+int gap_less = 0; // User command status (gap--)
+int trainer = 0; // User command status (trainer)
+int fix_CDRWIN = 0; // Special CDRWIN pregap injection status
+char LeadOut[6]; // Formatted Lead-Out MM:SS:FF
+int dumpsize; // BIN (disc image) size
+int sector_count; // Calculated number of sectors
+int leadoutM; // Calculated Lead-Out MM:__:__
+int leadoutS; // Calculated Lead-Out __:SS:__
+int leadoutF; // Calculated Lead-Out __:__:FF
+int track_count = 0;; // Number of "TRACK " occurrences in the cue
+int pregap_count = 0;; // Number of "PREGAP" occurrences in the cue
 int postgap_count = 0; // Number of "POSTGAP" occurrences in the cue
+int daTrack_ptr = 0; // Indicates the location of the pregap that's between the data track and the first audio track
+int headersize = 0x100000; // POPS header size. Also used as buffer size for caching BIN data in file output operations
 
-typedef struct {
-	int vmode; // User command status (vmode)
-	int trainer; // User command status (trainer)
+int deny_vmode = 0; 	// 2013/05/16 - v2.0 : Triggered by GameIdentifier... Makes NTSCpatcher skip the PAL->NTSC patch.
+int fix_game = 0;		// 2013/05/16 - v2.0 : Triggered by GameIdentifier... Enables GameFixer .
+int GameHasCheats = 0;	// 2013/05/16 - v2.0 : Triggered by GameIdentifier... .
 
-	int gap_more; // User command status (gap++)
-	int gap_less; // User command status (gap--)
-
-	int deny_vmode; 	// 2013/05/16 - v2.0 : Triggered by GameIdentifier... Makes NTSCpatcher skip the PAL->NTSC patch.
-	int fix_game;		// 2013/05/16 - v2.0 : Triggered by GameIdentifier... Enables GameFixer .
-
-	int game_has_cheats;	// 2013/05/16 - v2.0 : Triggered by GameIdentifier... .
-	int game_title;
-	int game_trained;
-	int game_fixed;
-} parameters;
+int GameTitle = 0;
+int GameTrained = 0;
+int GameFixed = 0;
 
 
 
-void game_identifier(unsigned char *inbuf, parameters *p)
+void GameIdentifier(unsigned char *inbuf)
 {
 	int ptr;
 
 	if(debug != 0) {
-		if(p->vmode == 0) {
-			printf("----------------------------------------------------------------------------------\n");
-		}
-		printf("Hello from game_identifier!\n");
+		if(vmode == 0) printf("----------------------------------------------------------------------------------\n");
+		printf("Hello from GameIdentifier !\n");
 	}
 
-	if(p->game_title == 0) {
-		for(ptr = 0; ptr < HEADERSIZE; ptr += 4) {
+	if(GameTitle == 0) {
+		for(ptr = 0; ptr < headersize; ptr += 4) {
 			if(inbuf[ptr] == 'S' && inbuf[ptr+1] == 'C' && inbuf[ptr+2] == 'E' && inbuf[ptr+3] == 'S' && inbuf[ptr+4] == '-' && inbuf[ptr+5] == '0' && inbuf[ptr+6] == '0' && inbuf[ptr+7] == '3' && inbuf[ptr+8] == '4' && inbuf[ptr+9] == '4' && inbuf[ptr+10] == ' ' && inbuf[ptr+11] == ' ' && inbuf[ptr+12] == ' ' && inbuf[ptr+13] == ' ' && inbuf[ptr+14] == ' ' && inbuf[ptr+15] == ' ') {
-				if(debug == 0) {
-					printf("----------------------------------------------------------------------------------\n");
-				}
+			http://www.assemblergames.com/forums/newreply.php?do=newreply&p=758246	if(debug == 0) printf("----------------------------------------------------------------------------------\n");
 				printf("Crash Bandicoot [SCES-00344]\n");
-				p->deny_vmode++; // 2013/05/16 - v2.0 : The NTSC patch fucks up the framerate badly, so now it's skipped
-				p->game_title = 1;
-				p->game_has_cheats = 1;
-				p->fix_game = 0;
+				deny_vmode ++; // 2013/05/16 - v2.0 : The NTSC patch fucks up the framerate badly, so now it's skipped
+				GameTitle = 1;
+				GameHasCheats = 1;
+				fix_game = 0;
 				break;
 			}
 			/* -------------------------------- */
 			if(inbuf[ptr] == 'S' && inbuf[ptr+1] == 'C' && inbuf[ptr+2] == 'U' && inbuf[ptr+3] == 'S' && inbuf[ptr+4] == '-' && inbuf[ptr+5] == '9' && inbuf[ptr+6] == '4' && inbuf[ptr+7] == '9' && inbuf[ptr+8] == '0' && inbuf[ptr+9] == '0' && inbuf[ptr+10] == ' ' && inbuf[ptr+11] == ' '&& inbuf[ptr+12] == ' ' && inbuf[ptr+13] == ' ' && inbuf[ptr+14] == ' ' && inbuf[ptr+15] == ' ') {
-				if(debug == 0) {
-					printf("----------------------------------------------------------------------------------\n");
-				}
+				if(debug == 0) printf("----------------------------------------------------------------------------------\n");
 				printf("Crash Bandicoot [SCUS-94900]\n");
-				p->game_title = 2;
-				p->game_has_cheats = 1;
-				p->fix_game = 0;
+				GameTitle = 2;
+				GameHasCheats = 1;
+				fix_game = 0;
 				break;
 			}
 			/* -------------------------------- */
 			if(inbuf[ptr] == 'S' && inbuf[ptr+1] == 'C' && inbuf[ptr+2] == 'P' && inbuf[ptr+3] == 'S' && inbuf[ptr+4] == '_' && inbuf[ptr+5] == '1' && inbuf[ptr+6] == '0' && inbuf[ptr+7] == '0' && inbuf[ptr+8] == '3' && inbuf[ptr+9] == '1' && inbuf[ptr+10] == ' ' && inbuf[ptr+11] == ' ' && inbuf[ptr+12] == ' ' && inbuf[ptr+13] == ' ' && inbuf[ptr+14] == ' ' && inbuf[ptr+15] == ' ') {
-				if(debug == 0) {
-					printf("----------------------------------------------------------------------------------\n");
-				}
+				if(debug == 0) printf("----------------------------------------------------------------------------------\n");
 				printf("Crash Bandicoot [SCPS-10031]\n");
-				p->game_title = 3;
-				p->game_has_cheats = 1;
-				p->fix_game = 0;
+				GameTitle = 3;
+				GameHasCheats = 1;
+				fix_game = 0;
 				break;
 			}
 			/* -------------------------------- */
 			if(inbuf[ptr] == ' ' && inbuf[ptr+1] == '1' && inbuf[ptr+2] == '9' && inbuf[ptr+3] == '9' && inbuf[ptr+4] == '9' && inbuf[ptr+5] == '0' && inbuf[ptr+6] == '8' && inbuf[ptr+7] == '1' && inbuf[ptr+8] == '6' && inbuf[ptr+9] == '1' && inbuf[ptr+10] == '4' && inbuf[ptr+11] == '1' && inbuf[ptr+12] == '6' && inbuf[ptr+13] == '3' && inbuf[ptr+14] == '3' && inbuf[ptr+15] == '0' && inbuf[ptr+16] == '0' && inbuf[ptr+17] == '$') {
-				if(debug == 0) {
-					printf("----------------------------------------------------------------------------------\n");
-				}
+				if(debug == 0) printf("----------------------------------------------------------------------------------\n");
 				printf("Metal Gear Solid : Special Missions [SLES-02136]\n");
-				p->game_title = 4;
-				p->game_has_cheats = 0;
-				p->fix_game = 1;
+				GameTitle = 4;
+				GameHasCheats = 0;
+				fix_game = 1;
 				break;
 			}
 		}
 	}
 
-	if(p->game_title != 0 && p->fix_game == 1) {
-		printf("GameFixer is ON\n");
-	}
-	if(p->game_title != 0 && p->trainer == 1 && p->game_has_cheats == 0) {
-		printf("There is no cheat for this title\n");
-	}
-	if(p->game_title != 0 && p->deny_vmode != 0 && p->vmode == 1) {
-		printf("VMODE patching is disabled for this title\n");
-	}
-	if(p->game_title != 0 && debug == 0) {
-		printf("----------------------------------------------------------------------------------\n");
-	}
+	if(GameTitle != 0 && fix_game == 1) printf("GameFixer is ON\n");
+	if(GameTitle != 0 && trainer == 1 && GameHasCheats == 0) printf("There is no cheat for this title\n");
+	if(GameTitle != 0 && deny_vmode != 0 && vmode == 1) printf("VMODE patching is disabled for this title\n");
+	if(GameTitle != 0 && debug == 0) printf("----------------------------------------------------------------------------------\n");
 
 	if(debug != 0) {
-		printf("game_title     = %d\n", p->game_title);
-		printf("fix_game      = %d\n", p->fix_game);
-		printf("deny_vmode    = %d\n", p->deny_vmode);
-		printf("game_has_cheats = %d\n", p->game_has_cheats);
-		printf("game_identifier says goodbye.\n");
+		printf("GameTitle     = %d\n", GameTitle);
+		printf("fix_game      = %d\n", fix_game);
+		printf("deny_vmode    = %d\n", deny_vmode);
+		printf("GameHasCheats = %d\n", GameHasCheats);
+		printf("GameIdentifier says goodbye.\n");
 		printf("----------------------------------------------------------------------------------\n");
 	}
 
-	if(p->game_title == 0 && p->trainer == 1) {
+	if(GameTitle == 0 && trainer == 1) {
 		printf("Unknown game, no fix/trainer enabled\n");
 		printf("Continuing...\n");
 	}
 }
 
-void game_fixer(unsigned char *inbuf, parameters *p)
+
+void GameFixer(unsigned char *inbuf)
 {
 	int ptr;
 
-	if(p->game_fixed == 0) {
-		for(ptr = 0; ptr < HEADERSIZE; ptr += 4) {
-			if(p->game_title == 4) {
+	if(GameFixed == 0) {
+		for(ptr = 0; ptr < headersize; ptr += 4) {
+			if(GameTitle == 4) {
 				if(inbuf[ptr] == 0x78 && inbuf[ptr+1] == 0x26 && inbuf[ptr+2] == 0x43 && inbuf[ptr+3] == 0x8C) inbuf[ptr] = 0x74;
 				if(inbuf[ptr] == 0xE8 && inbuf[ptr+1] == 0x75 && inbuf[ptr+2] == 0x06 && inbuf[ptr+3] == 0x80) {
 					inbuf[ptr-8] = 0x07;
-					printf("game_fixer : Disc Swap Patched\n");
-					p->game_fixed = 1;
+					printf("GameFixer : Disc Swap Patched\n");
+					GameFixed = 1;
 					printf("----------------------------------------------------------------------------------\n");
 					break;
 				}
@@ -148,35 +135,36 @@ void game_fixer(unsigned char *inbuf, parameters *p)
 	}
 }
 
-void game_trainer(unsigned char *inbuf, parameters *p)
+
+void GameTrainer(unsigned char *inbuf)
 {
 	int ptr;
 
-	if(p->game_trained == 0) {
-		for(ptr = 0; ptr < HEADERSIZE; ptr += 4) {
-			if(p->game_title == 1) {
+	if(GameTrained == 0) {
+		for(ptr = 0; ptr < headersize; ptr += 4) {
+			if(GameTitle == 1) {
 				if(inbuf[ptr] == 0x7C && inbuf[ptr+1] == 0x16 && inbuf[ptr+2] == 0x20 && inbuf[ptr+3] == 0xAC) {
 					inbuf[ptr+2] = 0x22;
-					printf("game_trainer : Test Save System Enabled\n");
-					p->game_trained = 1;
+					printf("GameTrainer : Test Save System Enabled\n");
+					GameTrained = 1;
 					printf("----------------------------------------------------------------------------------\n");
 					break;
 				}
 			}
-			if(p->game_title == 2) {
+			if(GameTitle == 2) {
 				if(inbuf[ptr] == 0x9C && inbuf[ptr+1] == 0x19 && inbuf[ptr+2] == 0x20 && inbuf[ptr+3] == 0xAC) {
 					inbuf[ptr+2] = 0x22;
-					printf("game_trainer : Test Save System Enabled\n");
-					p->game_trained = 1;
+					printf("GameTrainer : Test Save System Enabled\n");
+					GameTrained = 1;
 					printf("----------------------------------------------------------------------------------\n");
 					break;
 				}
 			}
-			if(p->game_title == 3) {
+			if(GameTitle == 3) {
 				if(inbuf[ptr] == 0x84 && inbuf[ptr+1] == 0x19 && inbuf[ptr+2] == 0x20 && inbuf[ptr+3] == 0xAC) {
 					inbuf[ptr+2] = 0x22;
-					printf("game_trainer : Test Save System Enabled\n");
-					p->game_trained = 1;
+					printf("GameTrainer : Test Save System Enabled\n");
+					GameTrained = 1;
 					printf("----------------------------------------------------------------------------------\n");
 					break;
 				}
@@ -185,201 +173,96 @@ void game_trainer(unsigned char *inbuf, parameters *p)
 	}
 }
 
-void NTSC_patcher(unsigned char *inbuf, int tracker, parameters *p)
-{
-	int i;
 
-	for(i = 0; i < HEADERSIZE; i += 4) {
-		if((inbuf[i] == 0x13 && inbuf[i+1] == 0x00 && (inbuf[i+2] == 0x90 || inbuf[i+2] == 0x91) && inbuf[i+3] == 0x24) && (inbuf[i+4] == 0x10 && inbuf[i+5] == 0x00 && (inbuf[i+6] == 0x90 || inbuf[i+6] == 0x91) && inbuf[i+7] == 0x24)) {
+void NTSCpatcher(unsigned char *inbuf, int tracker)
+{
+	int ptr;
+
+	for(ptr = 0; ptr < headersize; ptr += 4) {
+		if((inbuf[ptr] == 0x13 && inbuf[ptr+1] == 0x00 && (inbuf[ptr+2] == 0x90 || inbuf[ptr+2] == 0x91) && inbuf[ptr+3] == 0x24) && (inbuf[ptr+4] == 0x10 && inbuf[ptr+5] == 0x00 && (inbuf[ptr+6] == 0x90 || inbuf[ptr+6] == 0x91) && inbuf[ptr+7] == 0x24)) {
 			// ?? 00 90 24 ?? 00 90 24 || ?? 00 91 24 ?? 00 91 24 || ?? 00 91 24 ?? 00 90 24 || ?? 00 90 24 ?? 00 91 24
-			printf("Y-Pos pattern found at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + i, (tracker + i) / SECTORSIZE, HEADERSIZE + tracker + i);
-			inbuf[i] = 0xF8;		// 2013/05/16, v2.0 : Also apply the fix here, in case NTSC_patcher cannot find/patch the video mode
-			inbuf[i+1] = 0xFF;	// 2013/05/16, v2.0 : //
-			inbuf[i+4] = 0xF8;
-			inbuf[i+5] = 0xFF;
+			printf("Y-Pos pattern found at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + ptr, (tracker + ptr) / sectorsize, headersize + tracker + ptr);
+			inbuf[ptr] = 0xF8;		// 2013/05/16, v2.0 : Also apply the fix here, in case NTSCpatcher cannot find/patch the video mode
+			inbuf[ptr+1] = 0xFF;	// 2013/05/16, v2.0 : //
+			inbuf[ptr+4] = 0xF8;
+			inbuf[ptr+5] = 0xFF;
 			printf("----------------------------------------------------------------------------------\n");
-		} else if(inbuf[i+2] != 0xBD && inbuf[i+3] != 0x27 && inbuf[i+4] == 0x08 && inbuf[i+5] == 0x00 && inbuf[i+6] == 0xE0 && inbuf[i+7] == 0x03 && inbuf[i+14] == 0x02 && inbuf[i+15] == 0x3C && inbuf[i+18] == 0x42 && inbuf[i+19] == 0x8C && inbuf[i+20] == 0x08 && inbuf[i+21] == 0x00 && inbuf[i+22] == 0xE0 && inbuf[i+23] == 0x03 && inbuf[i+24] == 0x00 && inbuf[i+25] == 0x00 && inbuf[i+26] == 0x00 && inbuf[i+27] == 0x00 && ((inbuf[i+2] == 0x24 && inbuf[i+3] == 0xAC) || (inbuf[i+6] == 0x24 && inbuf[i+7] == 0xAC) || (inbuf[i+10] == 0x24 && inbuf[i+11] == 0xAC))) {
+		} else if(inbuf[ptr+2] != 0xBD && inbuf[ptr+3] != 0x27 && inbuf[ptr+4] == 0x08 && inbuf[ptr+5] == 0x00 && inbuf[ptr+6] == 0xE0 && inbuf[ptr+7] == 0x03 && inbuf[ptr+14] == 0x02 && inbuf[ptr+15] == 0x3C && inbuf[ptr+18] == 0x42 && inbuf[ptr+19] == 0x8C && inbuf[ptr+20] == 0x08 && inbuf[ptr+21] == 0x00 && inbuf[ptr+22] == 0xE0 && inbuf[ptr+23] == 0x03 && inbuf[ptr+24] == 0x00 && inbuf[ptr+25] == 0x00 && inbuf[ptr+26] == 0x00 && inbuf[ptr+27] == 0x00 && ((inbuf[ptr+2] == 0x24 && inbuf[ptr+3] == 0xAC) || (inbuf[ptr+6] == 0x24 && inbuf[ptr+7] == 0xAC) || (inbuf[ptr+10] == 0x24 && inbuf[ptr+11] == 0xAC))) {
 			// ?? ?? ?? ?? 08 00 E0 03 ?? ?? ?? ?? ?? ?? 02 3C ?? ?? 42 8C 08 00 E0 03 00 00 00 00
-			if(p->deny_vmode != 0) {
-				printf("Skipped VMODE pattern at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + i, (tracker + i) / SECTORSIZE, HEADERSIZE + tracker + i);
-			}
-			if(p->deny_vmode == 0) {
-				printf("VMODE pattern found at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + i, (tracker + i) / SECTORSIZE, HEADERSIZE + tracker + i);
-				inbuf[i+12] = 0x00;
-				inbuf[i+13] = 0x00;
-				inbuf[i+14] = 0x00;
-				inbuf[i+15] = 0x00;
-				inbuf[i+16] = 0x00;
-				inbuf[i+17] = 0x00;
-				inbuf[i+18] = 0x02;
-				inbuf[i+19] = 0x24;
-				if(inbuf[i+2] == 0x24 && inbuf[i+3] == 0xAC) {
-					inbuf[i+2] = 0x20;
-				} else if(inbuf[i+6] == 0x24 && inbuf[i+7] == 0xAC) {
-					inbuf[i+6] = 0x20;
-				} else if(inbuf[i+10] == 0x24 && inbuf[i+11] == 0xAC) {
-					inbuf[i+10] = 0x20;
-				}
+			if(deny_vmode != 0) printf("Skipped VMODE pattern at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + ptr, (tracker + ptr) / sectorsize, headersize + tracker + ptr);
+			if(deny_vmode == 0) {
+				printf("VMODE pattern found at dump offset 0x%X / LBA %d (VCD offset 0x%X)\n", tracker + ptr, (tracker + ptr) / sectorsize, headersize + tracker + ptr);
+				inbuf[ptr+12] = 0x00;
+				inbuf[ptr+13] = 0x00;
+				inbuf[ptr+14] = 0x00;
+				inbuf[ptr+15] = 0x00;
+				inbuf[ptr+16] = 0x00;
+				inbuf[ptr+17] = 0x00;
+				inbuf[ptr+18] = 0x02;
+				inbuf[ptr+19] = 0x24;
+				if(inbuf[ptr+2] == 0x24 && inbuf[ptr+3] == 0xAC) inbuf[ptr+2] = 0x20;
+				else if(inbuf[ptr+6] == 0x24 && inbuf[ptr+7] == 0xAC) inbuf[ptr+6] = 0x20;
+				else if(inbuf[ptr+10] == 0x24 && inbuf[ptr+11] == 0xAC) inbuf[ptr+10] = 0x20;
 			}
 			printf("----------------------------------------------------------------------------------\n");
 		}
 	}
 }
 
-int get_file_size(char *file_name)
-{
-	FILE *file_handle;
-	int status;
-	int size;
 
-	if(!(file_handle = fopen(file_name, "rb"))) {
-		printf("Error: Cannot open %s\n\n", file_name);
+int GetLeadOut(void)
+{
+	/* MSF is calculated from the dump size so DO NOT APPLY gap++/gap-- ADJUSTMENTS IN THIS FUNCTION ! */
+
+	if(!(file = fopen(dumpaddr, "rb"))) { // Open the BINARY that is attached to the cue
+		printf("Error: Cannot open %s\n\n", dumpaddr);
+                printf("Did you double-check the full path of the bin file?!!!\n\n");
 		return -1;
 	}
+	fseek(file, 0, SEEK_END);
+	dumpsize = ftell(file); // Get it's size
+	fclose(file);
 
-	status = fseek(file_handle, 0, SEEK_END);
-	if (status != 0) {
-		printf("Error: Failed to seek %s\n", file_name);
-		return -1;
-	}
-
-	size = ftell(file_handle);
-	if (size == -1L) {
-		printf("Error: Failed to get file %s size\n", file_name);
-		return -1;
-	}
-	fclose(file_handle);
-
-	return size;
-}
-
-int evaluate_arg(const char *arg, parameters *p)
-{
-	int handled = 1;
-
-	if(!strcmp(arg, "gap++")) {
-		p->gap_more = 1;
-	} else if(!strcmp(arg, "gap--")) {
-		p->gap_less = 1;
-	} else if(!strcmp(arg, "vmode")) {
-		p->vmode = 1;
-	} else if(!strcmp(arg, "trainer")) {
-		p->trainer = 1;
-	} else {
-		handled = 0;
-	}
-	return handled;
-}
-
-//Check that file has correct naming and that it actually exists
-int is_cue(const char *file_name)
-{
-	FILE *file_handle;
-	char *cue_loc;
-
-	cue_loc = strstr(file_name, ".cue");
-	if (cue_loc != NULL) {
-		return 1;
-	}
-
-	cue_loc = strstr(file_name, ".CUE");
-	if (cue_loc != NULL) {
-		return 1;
-	}
-
-	file_handle = fopen(file_name, "Rb");
-	if (file_handle) {
-		fclose(file_handle);
-		return 1;
-	}
-
-	return 0;
-}
-
-int convert_file_ending_to_vcd(const char *file_name)
-{
-	char *cue_loc;
-
-	cue_loc = strstr(file_name, ".cue");
-	if (cue_loc != NULL) {
-		//FIXME: Is upper case ending necessary?
-		strcpy(cue_loc, ".VCD");
-		return 0;
-	}
-
-	cue_loc = strstr(file_name, ".CUE");
-	if (cue_loc != NULL) {
-		strcpy(cue_loc, ".VCD");
-		return 0;
-	}
-
-	printf("Error: Input argument was not a cue file\n");
-	return -2;
-}
-
-int get_lead_out(unsigned char *hbuf, int b_size, int *sector_count)
-{
-	/* MSF is calculated from the .bin size so DO NOT APPLY gap++/gap-- ADJUSTMENTS IN THIS FUNCTION ! */
-
-	// Formatted Lead-Out MM:SS:FF
-	char LeadOut[7];
-	int leadoutM; // Calculated Lead-Out MM:__:__
-	int leadoutS; // Calculated Lead-Out __:SS:__
-	int leadoutF; // Calculated Lead-Out __:__:FF
-
-	*sector_count = (b_size / SECTORSIZE) + (150 * (pregap_count + postgap_count)) + 150; // Convert the b_size to sector count
-	leadoutM = *sector_count / 4500;
-	leadoutS = (*sector_count - leadoutM * 4500) / 75;
-	leadoutF = *sector_count - leadoutM * 4500 - leadoutS * 75;
-	if(debug != 0) {
-		printf("Calculated Lead-Out MSF = %02d:%02d:%02d\n", leadoutM, leadoutS, leadoutF);
-	}
-	*sector_count = (b_size / SECTORSIZE) + (150 * (pregap_count + postgap_count));
-	if(debug != 0) {
-		printf("Calculated Sector Count = %08Xh (%i)\n", *sector_count, *sector_count);
-	}
-
+	sector_count = (dumpsize / sectorsize) + (150 * (pregap_count + postgap_count)) + 150; // Convert the dumpsize to sector count
+	leadoutM = sector_count / 4500;
+	leadoutS = (sector_count - leadoutM * 4500) / 75;
+	leadoutF = sector_count - leadoutM * 4500 - leadoutS * 75;
+	if(debug != 0) printf("Calculated Lead-Out MSF = %02d:%02d:%02d\n", leadoutM, leadoutS, leadoutF);
+	sector_count = (dumpsize / sectorsize) + (150 * (pregap_count + postgap_count));
+	if(debug != 0) printf("Calculated Sector Count = %08Xh (%i)\n", sector_count, sector_count);
 	// Additonally we can add a dbg printf of the sector count that's written in sector 16 for verification. Mmmm kinda waste of time
+
+
 	/* Tired of math already. sprintf + redo what was done with the cue sheet MSFs */
 	sprintf(&LeadOut[0], "%02d", leadoutM);
 	sprintf(&LeadOut[2], "%02d", leadoutS);
 	sprintf(&LeadOut[4], "%02d", leadoutF);
+	LeadOut[0] = ((LeadOut[0] - 48) * 16) + (LeadOut[1] - 48);
+	LeadOut[1] = ((LeadOut[2] - 48) * 16) + (LeadOut[3] - 48);
+	LeadOut[2] = ((LeadOut[4] - 48) * 16) + (LeadOut[5] - 48);
+	LeadOut[3] = '\0';
+	LeadOut[4] = '\0';
+	LeadOut[5] = '\0';
+	if(debug != 0) printf("Formatted Lead-Out MSF  = %02X:%02X:%02X\n\n", LeadOut[0], LeadOut[1], LeadOut[2]);
 
-	/* Convert from ASCII symbol to number */
-	hbuf[27] = ((LeadOut[0] - '0') * 16) + (LeadOut[1] - '0');
-	hbuf[28] = ((LeadOut[2] - '0') * 16) + (LeadOut[3] - '0');
-	hbuf[29] = ((LeadOut[4] - '0') * 16) + (LeadOut[5] - '0');
-	if(debug != 0) {
-		printf("Formatted Lead-Out MSF  = %02X:%02X:%02X\n\n", hbuf[27], hbuf[28], hbuf[29]);
-	}
-
-	return 0;
+	return 1;
 }
+
 
 int main(int argc, char **argv)
 {
-	FILE *bin_file; //bin_file is used for opening the BIN that's attached to the cue.
-	char *bin_path; // name/path of the BIN that is attached to the cue. Handled by the parser then altered if it doesn't contain the full path.
-	int bin_size; // BIN (disc image) size
-
-	size_t result;
-
-	FILE *cue_file; //cue_file is used for opening the CUE
-	char *cue_name = NULL; // Name of cue file
-	char *cue_buf; // Buffer for the cue sheet
-	char *cue_ptr; // Pointer to the Track 01 type in the cue. Used to set the sector size, the disc type or to reject the cue
-	int cue_size; // Size of the cue sheet
-
-	FILE *vcd_file;
-	char *vcd_name = NULL;
-
+	char *cuebuf; // Buffer for the cue sheet
+	int cuesize; // Size of the cue sheet
+	int cue_ptr;  // Indicates the location of the current INDEX 01 entry in the cue sheet
 	int binary_count = 0; // Number of "BINARY" occurrences in the cue
 	int index0_count = 0; // Number of "INDEX 00" occurrences in the cue
 	int index1_count = 0; // Number of "INDEX 01" occurrences in the cue
 	int wave_count = 0; // Number of "WAVE" occurrences in the cue
+	char *ptr; // Pointer to the Track 01 type in the cue. Used to set the sector size, the disc type or to reject the cue
+	char answer[3]; // Where the user answer is stored. Used in the CDRWIN fix prompt shit
 
-	unsigned char *headerbuf; // Buffer for the POPS header
-	unsigned char *outbuf; // File I/O cache
+	char *headerbuf; // Buffer for the POPS header
+	unsigned char outbuf[headersize]; // File I/O cache
 	int header_ptr = 20; // Integer that points to a location of the POPS header buffer. Decimal 20 is the start of the descriptor "A2"
 	int i; // Tracker
 	int m; // Calculated and formatted MM:__:__ of the current index
@@ -387,19 +270,8 @@ int main(int argc, char **argv)
 	int f; // Calculated and formatted __:__:FF of the current index
 	int noCDDA = 0; // 2013/04/22 - v1.2 : Is set to 1 if no CDDA track was found in the game dump, used by the NTSC patcher
 
-	int gap_ptr = 0; // Indicates the location of the current INDEX 00 entry in the cue sheet
-
-	int daTrack_ptr = 0; // Indicates the location of the pregap that's between the data track and the first audio track
-
-	int track_count = 0; // Number of "TRACK " occurrences in the cue
-	int fix_CDRWIN = 0; // Special CDRWIN pregap injection status
-	int sector_count; // Calculated number of sectors
-
-	parameters params;
-	memset(&params, 0, sizeof(params));
-
 	printf("\nBIN/CUE to IMAGE0.VCD conversion tool v2.0\n");
-	printf("Last modified: %s\n\n", __DATE__);
+	printf("Last modified : 2013/05/16\n\n");
 
 	if(argc <= 1) {
 		printf("Error: No input file specified (cue sheet)\n\n");
@@ -432,158 +304,221 @@ int main(int argc, char **argv)
 		printf("%s mygame.cue gap++ vmode trainer IMAGE0.VCD\n", argv[0]);
 		printf("%s mygame.cue gap-- vmode trainer IMAGE0.VCD\n", argv[0]);
 		printf("Commands and output file are optional.\n\n");
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	//Parse commands
-	for (i = 1; i < argc; i++) {
-		//Always assume that the first non command argument given is the input .cue file"
-		if (!evaluate_arg(argv[i], &params) && (cue_name == NULL)) {
-			cue_name = strdup(argv[i]);
-		} else {
-			vcd_name = strdup(argv[i]);
-		}
+	// if(argc == 2), PROGRAM.EXE INPUT.CUE and make the output file name from the input file name
+
+	if(argc == 3) { // PROGRAM.EXE INPUT.CUE <CMD_1/OUTPUT>
+		if(!strcmp(argv[2], "gap++")) 	gap_more = 1;
+		if(!strcmp(argv[2], "gap--")) 	gap_less = 1;
+		if(!strcmp(argv[2], "vmode")) 	vmode = 1;
+		if(!strcmp(argv[2], "trainer")) trainer = 1;
+		// else, argv[2] is the output file name
 	}
 
-	if (is_cue(cue_name) == 0) {
-		printf("input .cue file: %s did not exist\n", cue_name);
+	if(argc == 4) { // PROGRAM.EXE INPUT.CUE <CMD_1> <CMD_2/OUTPUT>
+		if(!strcmp(argv[2], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[2], "gap--")) 		gap_less = 1;
+		else if(!strcmp(argv[2], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[2], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 3 , argv[2]);
+			if(batch == 0) system("pause");
+			return 0;
+		}
+		if(!strcmp(argv[3], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[3], "gap--")) 		gap_less = 1;
+		else if(!strcmp(argv[3], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[3], "trainer")) 	trainer = 1;
+		// else, argv[3] is the output file name
+	}
+
+	if(argc == 5) { // PROGRAM.EXE INPUT.CUE <CMD_1> <CMD_2> <CMD_3/OUTPUT>
+		if(!strcmp(argv[2], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[2], "gap--")) 		gap_less = 1;
+		else if(!strcmp(argv[2], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[2], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 4 , argv[2]);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		if(!strcmp(argv[3], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[3], "gap--")) 		gap_less = 1;
+		else if(!strcmp(argv[3], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[3], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 3 , argv[3]);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		if(!strcmp(argv[4], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[4], "gap--"))	 	gap_less = 1;
+		else if(!strcmp(argv[4], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[4], "trainer")) 	trainer = 1;
+		// else, argv[4] is the output file name
+	}
+
+	if(argc == 6) { // PROGRAM.EXE INPUT.CUE <CMD_1> <CMD_2> <CMD_3> <OUTPUT>
+		if(!strcmp(argv[2], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[2], "gap--")) 		gap_less = 1;
+		else if(!strcmp(argv[2], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[2], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 4 , argv[2]);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		if(!strcmp(argv[3], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[3], "gap--"))	 	gap_less = 1;
+		else if(!strcmp(argv[3], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[3], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 3 , argv[3]);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		if(!strcmp(argv[4], "gap++")) 			gap_more = 1;
+		else if(!strcmp(argv[4], "gap--"))	 	gap_less = 1;
+		else if(!strcmp(argv[4], "vmode")) 		vmode = 1;
+		else if(!strcmp(argv[4], "trainer")) 	trainer = 1;
+		else {
+			printf("Syntax Error : Argument %d (%s) is not valid.\n\n", argc - 2 , argv[4]);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		// argv[5] is the output file name
+	}
+
+	if(argc >= 7) { // No moar plz
+		printf("Error: I don't need %d args, one input file is enuff\n\n", argc - 1);
+		printf("Usage :\n");
+		printf("%s input.cue <cmd_1> <cmd_2> <cmd_3> <output.vcd>\n\n", argv[0]);
+		printf("Commands are :\n");
+		printf("gap++ : Adds 2 seconds to all track indexes MSF\n");
+		printf("gap-- : Substracts 2 seconds to all track indexes MSF\n");
+		printf("vmode : Attempts to patch the video mode to NTSC and to fix the screen position\n");
+		printf("trainer : Enable cheats\n\n");
+		printf("Examples :\n");
+		printf("%s mygame.cue\n", argv[0]);
+		printf("%s mygame.cue IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue vmode\n", argv[0]);
+		printf("%s mygame.cue gap++\n", argv[0]);
+		printf("%s mygame.cue gap--\n", argv[0]);
+		printf("%s mygame.cue trainer\n", argv[0]);
+		printf("%s mygame.cue vmode IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap++ IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap-- IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue trainer IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap++ vmode\n", argv[0]);
+		printf("%s mygame.cue gap++ trainer\n", argv[0]);
+		printf("%s mygame.cue gap-- vmode\n", argv[0]);
+		printf("%s mygame.cue gap-- trainer\n", argv[0]);
+		printf("%s mygame.cue gap++ vmode IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap-- vmode IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap++ trainer IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap-- trainer IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap++ vmode trainer IMAGE0.VCD\n", argv[0]);
+		printf("%s mygame.cue gap-- vmode trainer IMAGE0.VCD\n", argv[0]);
+		printf("Commands and output file are optional.\n\n");
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	if (vcd_name == NULL) {
-		//Output file name was not defined. Assume it is the same as the input but with a .VCD ending
-		vcd_name = strdup(argv[1]);
-		if (vcd_name == NULL) {
-			printf("Error: Failed to copy destination string\n");
-			return 0;
-		}
-
-		if (convert_file_ending_to_vcd(vcd_name)) {
-			printf("Error: Failed to change file ending to .VCD\n");
-			return 0;
-		}
-	}
-
-	if(params.gap_more == 1 && params.gap_less == 1) { // User is dumb
+	if(gap_more == 1 && gap_less == 1) { // User is dumb
 		printf("Syntax Error : Conflicting gap++/gap-- arguments.\n\n");
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
 	if(debug != 0) {
 		printf("CMD SWITCHES :\n");
-		printf("gap_more   = %d\n", params.gap_more);
-		printf("gap_less   = %d\n", params.gap_less);
-		printf("vmode      = %d\n", params.vmode);
-		printf("trainer    = %d\n\n", params.trainer);
+		printf("gap_more   = %d\n", gap_more);
+		printf("gap_less   = %d\n", gap_less);
+		printf("vmode      = %d\n", vmode);
+		printf("trainer    = %d\n\n", trainer);
 	}
 
 
-	cue_size = get_file_size(cue_name);
-	if (cue_size < 0) {
-		printf("Failed to open cuefile %s, error %s\n", argv[1], strerror(errno));
+	if(!(file = fopen(argv[1], "rb"))) { // Open the cue sheet
+		printf("Error: Cannot open %s\n\n", argv[1]);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
+	fseek(file, 0, SEEK_END);
+	cuesize = ftell(file);
+	rewind(file);
+	cuebuf = malloc(cuesize * 2);
+	fread(cuebuf, cuesize, 1, file);
+	fclose(file);
 
-	cue_file = fopen(cue_name, "rb");
-	if (cue_file == NULL) {
-		printf("Failed to open cuefile %s, error %s\n", argv[1], strerror(errno));
-		return 0;
-	}
-
-	rewind(cue_file);
-	cue_buf = malloc(cue_size * 2);
-	if (cue_buf == NULL) {
-		printf("Failed to allocate memory for the cue buffer\n");
-		return 0;
-	}
-
-	result = fread(cue_buf, cue_size, 1, cue_file);
-	if (result != 1) {
-		printf("Failed to copy the cue to memory\n");
-		free(cue_buf);
-		return 0;
-	}
-	fclose(cue_file);
-
-	cue_ptr = strstr(cue_buf, "INDEX 01 ");
-	cue_ptr += 9;
-	if((cue_ptr[0] != '0') || (cue_ptr[1] != '0')) {
+	ptr = strstr(cuebuf, "INDEX 01 ");
+	ptr += 9;
+	if((ptr[0] != '0') || (ptr[1] != '0')) {
 		printf("Error: The cue sheet is not valid\n\n");
-		free(cue_buf);
+		free(cuebuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	cue_ptr = strstr(cue_buf, "FILE ");
-	cue_ptr += 5; // Jump to the BINARY name/path starting with " (it's right after "FILE ")
-	if(cue_ptr[0] != '"') {
+	ptr = strstr(cuebuf, "FILE ");
+	ptr += 5; // Jump to the BINARY name/path starting with " (it's right after "FILE ")
+	if(ptr[0] != 0x22) {
 		printf("Error: The cue sheet is not valid\n\n");
-		free(cue_buf);
+		free(cuebuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	for(i = 0; i < cue_size; i++) {
-		if(cue_buf[i] == '"') {
-			cue_buf[i] = '\0';
-		}
+	for(i = 0; i < cuesize; i++) {
+		if(cuebuf[i] == 0x22) cuebuf[i] = '\0';
 	}
-	cue_ptr++; // Jump to the BINARY name/path starting with "
+	ptr++; // Jump to the BINARY name/path starting with "
 
-	bin_path = malloc((strlen(cue_ptr) + strlen(cue_name)) * 2);
-	if (bin_path == NULL) {
-		printf("Error: Failed to allocate memory for the bin_path string\n");
-		free(cue_buf);
-		return 0;
-	}
 
-	for(i = strlen(cue_ptr); i > 0; i--) { // Does the cue have the full BINARY path ?
-		if((cue_ptr[i] == '\\') || (cue_ptr[i] == '/')) { // YES !
-			strcpy(bin_path, cue_ptr);
+	dumpaddr = malloc((strlen(ptr) + strlen(argv[1])) * 2);
+//mod, changed '\' (0x5C) to '/' (0x2f)
+	for(i = strlen(ptr); i > 0; i--) { // Does the cue have the full BINARY path ?
+		if(ptr[i] == 0x2F) { // YES !
+			strcpy(dumpaddr, ptr);
 			break;
 		}
 	}
 	if(i == 0) { // If no..
-		for(i = strlen(cue_name); i > 0; i--) { // Does the arg have the full cue path ?
-		  if((cue_name[i] == '\\') || (cue_name[i] == '/')) {
-		    break; // YES!
-		  }
+		for(i = strlen(argv[1]); i > 0; i--) { // Does the arg have the full cue path ?
+			if(argv[1][i] == 0x2F) break;// YES !
 		}
-
-		if(i == 0) {
-		  // Having a filename without hierarchy is perfectly ok.
-		  strcpy(bin_path, cue_ptr);
+		if(i == 0) { // No path in argv[1] + No path in the cuesheet ? Then it's FUQD :( .
+			printf("Error: Cannot find %s that is linked to the cue sheet\n\n", ptr);
+                        printf("NOTE: If you're using Linux environment, just edit the full path of bin file in the cue sheet\n\n", ptr);
+			free(cuebuf);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
 		} else { // Here we've got the full CUE path. We're gonna use it to make the BIN path.
-			strcpy(bin_path, cue_name);
+			strcpy(dumpaddr, argv[1]);
 			/* Why should I use strrchr when I can do a n00ber thing ;D */
-			for(i = strlen(bin_path); i > 0; i--) {
-				if((bin_path[i] == '\\') || (bin_path[i] == '/')) {
-					break;
-				}
+			for(i = strlen(dumpaddr); i > 0; i--) {
+				if(dumpaddr[i] == 0x2F) break;
 			}
-			for(i = i+1; (unsigned long) i < strlen(bin_path); i++) {
-				bin_path[i] = 0x00; // How kewl is dat ?
-			}
+			for(i = i+1; i < strlen(dumpaddr); i++) dumpaddr[i] = 0x00; // How kewl is dat ?
 			/* Me no liek strncat */
-			i = strlen(bin_path);
-			strcpy(bin_path + i, cue_ptr);
-			i = strlen(bin_path);
-			if(cue_name[0] == '"') {
-				bin_path[i] = '"';
-			} else {
-				bin_path[i] = '\0';
-			}
+			i = strlen(dumpaddr);
+			strcpy(dumpaddr + i, ptr);
+			i = strlen(dumpaddr);
+			if(argv[1][0] == '"') dumpaddr[i] = '"';
+			else dumpaddr[i] = '\0';
 		}
 	}
 
 	if(debug != 0) {
-		printf("CUE Path   = %s\n", cue_name);
-		printf("BIN Path   = %s\n\n", bin_path);
+		printf("CUE Path   = %s\n", argv[1]);
+		printf("BIN Path   = %s\n\n", dumpaddr);
 	}
 
-	headerbuf = malloc(HEADERSIZE * 2);
-	if (headerbuf == NULL) {
-		printf("Error: Failed to allocate header buffer\n");
-		return 0;
-	}
+	headerbuf = malloc(headersize * 2);
 
 	/*******************************************************************************************************
 	********************************************************************************************************
@@ -650,61 +585,36 @@ int main(int argc, char **argv)
 	/*******************************************************************************************************
 	*******************************************************************************************************/
 
-	for(i = 0; i < cue_size; i++) { // Since I've nulled some chars in the BIN handler, here I prelocate the TRACK 01 string so the track type substring can be found
-		if(cue_buf[i] == 'T' && cue_buf[i+1] == 'R' && cue_buf[i+2] == 'A' && cue_buf[i+3] == 'C' && cue_buf[i+4] == 'K' && cue_buf[i+5] == ' ' && cue_buf[i+6] == '0' && cue_buf[i+7] == '1') {
-			break;
-		}
+	for(i = 0; i < cuesize; i++) { // Since I've nulled some chars in the BIN handler, here I prelocate the TRACK 01 string so the track type substring can be found
+		if(cuebuf[i] == 'T' && cuebuf[i+1] == 'R' && cuebuf[i+2] == 'A' && cuebuf[i+3] == 'C' && cuebuf[i+4] == 'K' && cuebuf[i+5] == ' ' && cuebuf[i+6] == '0' && cuebuf[i+7] == '1') break;
 	}
 
-	cue_ptr = strstr(cue_buf + i, "TRACK 01 MODE2/2352"); // Ought be
-	if(cue_ptr != NULL) {
-		if(debug != 0) {
-			printf("Disc Type Check : Is MODE2/2352\n");
-		}
+	ptr = strstr(cuebuf + i, "TRACK 01 MODE2/2352"); // Ought be
+	if(ptr != NULL) {
+		sectorsize = 2352;
+		if(debug != 0) printf("Disc Type Check : Is MODE2/2352\n");
 	} else { // 2013/05/16, v2.0 : Not MODE2/2352, tell the user and terminate
 		printf("Error: Looks like your game dump is not MODE2/2352, or the cue is invalid.\n\n");
-		free(cue_buf);
-		free(bin_path);
+		free(cuebuf);
+		free(dumpaddr);
 		free(headerbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	//FIXME: Migrate to function
-	for(i = 0; i < cue_size; i++) {
-		/* Clean out some crap in the cue_buf */
-		if(cue_buf[i] == ':') {
-			cue_buf[i] = '\0';
-		}
-		//Carriage return
-		if(cue_buf[i] == 0x0D) {
-			cue_buf[i] = '\0';
-		}
-		//Line feed
-		if(cue_buf[i] == 0x0A) {
-			cue_buf[i] = '\0';
-		}
+	for(i = 0; i < cuesize; i++) {
+		/* Clean out some crap in the cuebuf */
+		if(cuebuf[i] == ':') cuebuf[i] = '\0';
+		if(cuebuf[i] == 0x0D) cuebuf[i] = '\0';
+		if(cuebuf[i] == 0x0A) cuebuf[i] = '\0';
 		/* Count stuff in the cue */
-		if(cue_buf[i] == 'T' && cue_buf[i+1] == 'R' && cue_buf[i+2] == 'A' && cue_buf[i+3] == 'C' && cue_buf[i+4] == 'K' && cue_buf[i+5] == ' ') {
-			track_count++;
-		}
-		if(cue_buf[i] == 'I' && cue_buf[i+1] == 'N' && cue_buf[i+2] == 'D' && cue_buf[i+3] == 'E' && cue_buf[i+4] == 'X' && cue_buf[i+5] == ' ' && cue_buf[i+6] == '0' && cue_buf[i+7] == '1') {
-			index1_count++;
-		}
-		if(cue_buf[i] == 'I' && cue_buf[i+1] == 'N' && cue_buf[i+2] == 'D' && cue_buf[i+3] == 'E' && cue_buf[i+4] == 'X' && cue_buf[i+5] == ' ' && cue_buf[i+6] == '0' && cue_buf[i+7] == '0') {
-			index0_count++;
-		}
-		if(cue_buf[i] == 'B' && cue_buf[i+1] == 'I' && cue_buf[i+2] == 'N' && cue_buf[i+3] == 'A' && cue_buf[i+4] == 'R' && cue_buf[i+5] == 'Y') {
-			binary_count++;
-		}
-		if(cue_buf[i] == 'W' && cue_buf[i+1] == 'A' && cue_buf[i+2] == 'V' && cue_buf[i+3] == 'E') {
-			wave_count++;
-		}
-		if(cue_buf[i] == 'P' && cue_buf[i+1] == 'R' && cue_buf[i+2] == 'E' && cue_buf[i+3] == 'G' && cue_buf[i+4] == 'A' && cue_buf[i+5] == 'P') {
-			pregap_count++;
-		}
-		if(cue_buf[i] == 'P' && cue_buf[i+1] == 'O' && cue_buf[i+2] == 'S' && cue_buf[i+3] == 'T' && cue_buf[i+4] == 'G' && cue_buf[i+5] == 'A' && cue_buf[i+6] == 'P') {
-			postgap_count++;
-		}
+		if(cuebuf[i] == 'T' && cuebuf[i+1] == 'R' && cuebuf[i+2] == 'A' && cuebuf[i+3] == 'C' && cuebuf[i+4] == 'K' && cuebuf[i+5] == ' ') track_count++;
+		if(cuebuf[i] == 'I' && cuebuf[i+1] == 'N' && cuebuf[i+2] == 'D' && cuebuf[i+3] == 'E' && cuebuf[i+4] == 'X' && cuebuf[i+5] == ' ' && cuebuf[i+6] == '0' && cuebuf[i+7] == '1') index1_count++;
+		if(cuebuf[i] == 'I' && cuebuf[i+1] == 'N' && cuebuf[i+2] == 'D' && cuebuf[i+3] == 'E' && cuebuf[i+4] == 'X' && cuebuf[i+5] == ' ' && cuebuf[i+6] == '0' && cuebuf[i+7] == '0') index0_count++;
+		if(cuebuf[i] == 'B' && cuebuf[i+1] == 'I' && cuebuf[i+2] == 'N' && cuebuf[i+3] == 'A' && cuebuf[i+4] == 'R' && cuebuf[i+5] == 'Y') binary_count++;
+		if(cuebuf[i] == 'W' && cuebuf[i+1] == 'A' && cuebuf[i+2] == 'V' && cuebuf[i+3] == 'E') wave_count++;
+		if(cuebuf[i] == 'P' && cuebuf[i+1] == 'R' && cuebuf[i+2] == 'E' && cuebuf[i+3] == 'G' && cuebuf[i+4] == 'A' && cuebuf[i+5] == 'P') pregap_count++;
+		if(cuebuf[i] == 'P' && cuebuf[i+1] == 'O' && cuebuf[i+2] == 'S' && cuebuf[i+3] == 'T' && cuebuf[i+4] == 'G' && cuebuf[i+5] == 'A' && cuebuf[i+6] == 'P') postgap_count++;
 	}
 
 	if(debug != 0) {
@@ -717,102 +627,122 @@ int main(int argc, char **argv)
 	}
 	if(binary_count == 0) { // WTF ?
 		printf("Error: Unstandard cue sheet\n\n");
-		free(cue_buf);
-		free(bin_path);
+		free(cuebuf);
+		free(dumpaddr);
 		free(headerbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 	if((track_count == 0) || (track_count != index1_count)) { // Huh ?
-		printf("Error: Cannot count tracks\n\n");
-		free(cue_buf);
-		free(bin_path);
+		printf("Error : Cannot count tracks\n\n");
+		free(cuebuf);
+		free(dumpaddr);
 		free(headerbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 	if(binary_count != 1 || wave_count != 0) { // I urd u liek warez^^
 		printf("Error: Cue sheets of splitted dumps aren't supported\n\n");
-		free(cue_buf);
-		free(bin_path);
+		free(cuebuf);
+		free(dumpaddr);
 		free(headerbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
 	if(pregap_count == 1 && postgap_count == 0) { // Don't offer to fix the dump if more than 1 pregap was found or cue has postgaps
-		printf("Warning : The input file seems to be a CDRWIN cue sheet\n");
-		printf("          A pregap will be inserted in the output file...\n\n");
-		fix_CDRWIN = 1; //... And turn the CDRWIN  fix on
+		if(batch == 0) {
+			for(i = pregap_count; i > 0; i--) {
+				i++;
+				printf("Warning : The input file seems to be a CDRWIN cue sheet...\n");
+				printf("          Would you like to fix the disc image (Yes or No) ? ");
+				scanf("%s", answer);
+				if(!strcmp(answer, "Yes") || !strcmp(answer, "yes") || !strcmp(answer, "y") || !strcmp(answer, "Y")) {
+					fix_CDRWIN = 1;
+					printf("\n");
+					break;
+				}
+				if(!strcmp(answer, "No") || !strcmp(answer, "no") || !strcmp(answer, "n") || !strcmp(answer, "N")) {
+					printf("\n");
+					break;
+				}
+			}
+		} else { // Batch mode is ON, so don't prompt the user...
+			printf("Warning : The input file seems to be a CDRWIN cue sheet\n");
+			printf("          A pregap will be inserted in the output file...\n\n");
+			fix_CDRWIN = 1; //... And turn the CDRWIN  fix on
+		}
 	}
 
 	for(i = 0; i < track_count; i++) {
 		header_ptr += 10; // Put the pointer at the start of the correct track entry
-		int cue_index_ptr;  // Indicates the location of the current INDEX 01 entry in the cue sheet
 
-		for(cue_index_ptr = 0; cue_index_ptr < cue_size; cue_index_ptr++) {
-			if(cue_buf[cue_index_ptr] == 'T' && cue_buf[cue_index_ptr+1] == 'R' && cue_buf[cue_index_ptr+2] == 'A' && cue_buf[cue_index_ptr+3] == 'C' && cue_buf[cue_index_ptr+4] == 'K' && cue_buf[cue_index_ptr+5] == ' ') {
-				cue_buf[cue_index_ptr] = '\0';
-				cue_buf[cue_index_ptr + 1] = '\0';
-				cue_buf[cue_index_ptr + 2] = '\0';
-				cue_buf[cue_index_ptr + 3] = '\0';
-				cue_buf[cue_index_ptr + 4] = '\0';
-				cue_buf[cue_index_ptr + 5] = '\0';
+		for(cue_ptr = 0; cue_ptr < cuesize; cue_ptr++) {
+			if(cuebuf[cue_ptr] == 'T' && cuebuf[cue_ptr+1] == 'R' && cuebuf[cue_ptr+2] == 'A' && cuebuf[cue_ptr+3] == 'C' && cuebuf[cue_ptr+4] == 'K' && cuebuf[cue_ptr+5] == ' ') {
+				cuebuf[cue_ptr] = '\0';
+				cuebuf[cue_ptr + 1] = '\0';
+				cuebuf[cue_ptr + 2] = '\0';
+				cuebuf[cue_ptr + 3] = '\0';
+				cuebuf[cue_ptr + 4] = '\0';
+				cuebuf[cue_ptr + 5] = '\0';
 
 				/* Track Type : 41h = DATA Track / 01h CDDA Track */
-				if(cue_buf[cue_index_ptr + 13] == '2' || cue_buf[cue_index_ptr + 13] == '1' || cue_buf[cue_index_ptr + 13] != 'O') {
+				if(cuebuf[cue_ptr + 13] == '2' || cuebuf[cue_ptr + 13] == '1' || cuebuf[cue_ptr + 13] != 'O') {
 					headerbuf[10] = 0x41; 			// Assume DATA Track
 					headerbuf[20] = 0x41; 			// 2013/05/16, v2.0 : Assume DATA Track
 					headerbuf[header_ptr] = 0x41; 	// Assume DATA Track
 				}
-				if(cue_buf[cue_index_ptr + 13] == 'O') {
+				if(cuebuf[cue_ptr + 13] == 'O') {
 					headerbuf[10] = 0x01; 			// Assume AUDIO Track
 					headerbuf[20] = 0x01; 			// 2013/05/16, v2.0 : Assume AUDIO Track
 					headerbuf[header_ptr] = 0x01; 	// Assume AUDIO Track
 				}
 
-				headerbuf[header_ptr + 2] = ((cue_buf[cue_index_ptr + 6] - 48) * 16) + (cue_buf[cue_index_ptr + 7] - 48);	// Track Number
-				headerbuf[17] = ((cue_buf[cue_index_ptr + 6] - 48) * 16) + (cue_buf[cue_index_ptr + 7] - 48);				// Number of track entries
+				headerbuf[header_ptr + 2] = ((cuebuf[cue_ptr + 6] - 48) * 16) + (cuebuf[cue_ptr + 7] - 48);	// Track Number
+				headerbuf[17] = ((cuebuf[cue_ptr + 6] - 48) * 16) + (cuebuf[cue_ptr + 7] - 48);				// Number of track entries
 				break;
 			}
 		}
 
-		for(cue_index_ptr = 0; cue_index_ptr < cue_size; cue_index_ptr++) {
-			if(cue_buf[cue_index_ptr] == 'I' && cue_buf[cue_index_ptr+1] == 'N' && cue_buf[cue_index_ptr+2] == 'D' && cue_buf[cue_index_ptr+3] == 'E' && cue_buf[cue_index_ptr+4] == 'X' && cue_buf[cue_index_ptr+5] == ' ' && cue_buf[cue_index_ptr+6] == '0' && cue_buf[cue_index_ptr+7] == '0') {
-				gap_ptr = cue_index_ptr; // Memoryze the location of the INDEX 00 entry
-				cue_buf[cue_index_ptr] = '\0';
-				cue_buf[cue_index_ptr + 1] = '\0';
-				cue_buf[cue_index_ptr + 2] = '\0';
-				cue_buf[cue_index_ptr + 3] = '\0';
-				cue_buf[cue_index_ptr + 4] = '\0';
-				cue_buf[cue_index_ptr + 5] = '\0';
-				cue_buf[cue_index_ptr + 6] = '\0';
-				cue_buf[cue_index_ptr + 7] = '\0';
+		for(cue_ptr = 0; cue_ptr < cuesize; cue_ptr++) {
+			if(cuebuf[cue_ptr] == 'I' && cuebuf[cue_ptr+1] == 'N' && cuebuf[cue_ptr+2] == 'D' && cuebuf[cue_ptr+3] == 'E' && cuebuf[cue_ptr+4] == 'X' && cuebuf[cue_ptr+5] == ' ' && cuebuf[cue_ptr+6] == '0' && cuebuf[cue_ptr+7] == '0') {
+				gap_ptr = cue_ptr; // Memoryze the location of the INDEX 00 entry
+				cuebuf[cue_ptr] = '\0';
+				cuebuf[cue_ptr + 1] = '\0';
+				cuebuf[cue_ptr + 2] = '\0';
+				cuebuf[cue_ptr + 3] = '\0';
+				cuebuf[cue_ptr + 4] = '\0';
+				cuebuf[cue_ptr + 5] = '\0';
+				cuebuf[cue_ptr + 6] = '\0';
+				cuebuf[cue_ptr + 7] = '\0';
 			}
-			if(cue_buf[cue_index_ptr] == 'I' && cue_buf[cue_index_ptr+1] == 'N' && cue_buf[cue_index_ptr+2] == 'D' && cue_buf[cue_index_ptr+3] == 'E' && cue_buf[cue_index_ptr+4] == 'X' && cue_buf[cue_index_ptr+5] == ' ' && cue_buf[cue_index_ptr+6] == '0' && cue_buf[cue_index_ptr+7] == '1') {
-				cue_buf[cue_index_ptr] = '\0';
-				cue_buf[cue_index_ptr + 1] = '\0';
-				cue_buf[cue_index_ptr + 2] = '\0';
-				cue_buf[cue_index_ptr + 3] = '\0';
-				cue_buf[cue_index_ptr + 4] = '\0';
-				cue_buf[cue_index_ptr + 5] = '\0';
-				cue_buf[cue_index_ptr + 6] = '\0';
-				cue_buf[cue_index_ptr + 7] = '\0';
+			if(cuebuf[cue_ptr] == 'I' && cuebuf[cue_ptr+1] == 'N' && cuebuf[cue_ptr+2] == 'D' && cuebuf[cue_ptr+3] == 'E' && cuebuf[cue_ptr+4] == 'X' && cuebuf[cue_ptr+5] == ' ' && cuebuf[cue_ptr+6] == '0' && cuebuf[cue_ptr+7] == '1') {
+				cuebuf[cue_ptr] = '\0';
+				cuebuf[cue_ptr + 1] = '\0';
+				cuebuf[cue_ptr + 2] = '\0';
+				cuebuf[cue_ptr + 3] = '\0';
+				cuebuf[cue_ptr + 4] = '\0';
+				cuebuf[cue_ptr + 5] = '\0';
+				cuebuf[cue_ptr + 6] = '\0';
+				cuebuf[cue_ptr + 7] = '\0';
 
-				m = ((cue_buf[cue_index_ptr + 9] - 48) * 16) + (cue_buf[cue_index_ptr + 10] - 48);
-				s = ((cue_buf[cue_index_ptr + 12] - 48) * 16) + (cue_buf[cue_index_ptr + 13] - 48);
-				f = ((cue_buf[cue_index_ptr + 15] - 48) * 16) + (cue_buf[cue_index_ptr + 16] - 48);
+				m = ((cuebuf[cue_ptr + 9] - 48) * 16) + (cuebuf[cue_ptr + 10] - 48);
+				s = ((cuebuf[cue_ptr + 12] - 48) * 16) + (cuebuf[cue_ptr + 13] - 48);
+				f = ((cuebuf[cue_ptr + 15] - 48) * 16) + (cuebuf[cue_ptr + 16] - 48);
 
 				if(daTrack_ptr == 0 && headerbuf[10] == 0x01 && gap_ptr != 0) { // Targets the first AUDIO track INDEX 00 MSF
-					daTrack_ptr = (((((cue_buf[gap_ptr + 9] - 48) * 10) + (cue_buf[gap_ptr + 10] - 48)) * 4500) + ((((cue_buf[gap_ptr + 12] - 48) * 10) + (cue_buf[gap_ptr + 13] - 48)) * 75) + (((cue_buf[gap_ptr + 15] - 48) * 10) + (cue_buf[gap_ptr + 16] - 48))) * SECTORSIZE;
+					daTrack_ptr = (((((cuebuf[gap_ptr + 9] - 48) * 10) + (cuebuf[gap_ptr + 10] - 48)) * 4500) + ((((cuebuf[gap_ptr + 12] - 48) * 10) + (cuebuf[gap_ptr + 13] - 48)) * 75) + (((cuebuf[gap_ptr + 15] - 48) * 10) + (cuebuf[gap_ptr + 16] - 48))) * sectorsize;
 					if(debug != 0) {
 						printf("daTrack_ptr hit on TRACK %02d AUDIO INDEX 00 MSF minus 2 seconds !\n", i + 1);
 						printf("Current daTrack_ptr = %d (%Xh)\n", daTrack_ptr, daTrack_ptr);
-						printf("daTrack_ptr LBA     = %d (%Xh)\n\n", daTrack_ptr / SECTORSIZE, daTrack_ptr / SECTORSIZE);
+						printf("daTrack_ptr LBA     = %d (%Xh)\n\n", daTrack_ptr / sectorsize, daTrack_ptr / sectorsize);
 					}
 				} else if(daTrack_ptr == 0 && headerbuf[10] == 0x01 && gap_ptr == 0) { // Targets the first AUDIO track INDEX 01 MSF
-					daTrack_ptr = (((((cue_buf[cue_index_ptr + 9] - 48) * 10) + (cue_buf[cue_index_ptr + 10] - 48)) * 4500) + ((((cue_buf[cue_index_ptr + 12] - 48) * 10) + (cue_buf[cue_index_ptr + 13] - 48)) * 75) + (((cue_buf[cue_index_ptr + 15] - 48) * 10) + (cue_buf[cue_index_ptr + 16] - 48))) * SECTORSIZE;
+					daTrack_ptr = (((((cuebuf[cue_ptr + 9] - 48) * 10) + (cuebuf[cue_ptr + 10] - 48)) * 4500) + ((((cuebuf[cue_ptr + 12] - 48) * 10) + (cuebuf[cue_ptr + 13] - 48)) * 75) + (((cuebuf[cue_ptr + 15] - 48) * 10) + (cuebuf[cue_ptr + 16] - 48))) * sectorsize;
 					if(debug != 0) {
 						printf("daTrack_ptr hit on TRACK %02d AUDIO INDEX 01 MSF minus 2 seconds !\n", i + 1);
 						printf("Current daTrack_ptr = %d (%Xh)\n", daTrack_ptr, daTrack_ptr);
-						printf("daTrack_ptr LBA     = %d (%Xh)\n\n", daTrack_ptr / SECTORSIZE, daTrack_ptr / SECTORSIZE);
+						printf("daTrack_ptr LBA     = %d (%Xh)\n\n", daTrack_ptr / sectorsize, daTrack_ptr / sectorsize);
 					}
 				} else if(daTrack_ptr == 0 && headerbuf[10] == 0x41 && i == track_count - 1) { // Targets the EOF (if no audio track was found)
 					noCDDA = 1; // 2013/05/16 - v2.0
@@ -833,9 +763,9 @@ int main(int argc, char **argv)
 
 				/* ... If INDEX 00 was found, then we register it's MSF to the INDEX 00 MSF field 	*/
 				if(gap_ptr != 0) { // Pregap (INDEX 00) was found before
-					m = ((cue_buf[gap_ptr + 9] - 48) * 16) + (cue_buf[gap_ptr + 10] - 48);
-					s = ((cue_buf[gap_ptr + 12] - 48) * 16) + (cue_buf[gap_ptr + 13] - 48);
-					f = ((cue_buf[gap_ptr + 15] - 48) * 16) + (cue_buf[gap_ptr + 16] - 48);
+					m = ((cuebuf[gap_ptr + 9] - 48) * 16) + (cuebuf[gap_ptr + 10] - 48);
+					s = ((cuebuf[gap_ptr + 12] - 48) * 16) + (cuebuf[gap_ptr + 13] - 48);
+					f = ((cuebuf[gap_ptr + 15] - 48) * 16) + (cuebuf[gap_ptr + 16] - 48);
 					headerbuf[header_ptr + 3] = m;		// Absolute MM (INDEX 00)
 					headerbuf[header_ptr + 4] = s;		// Absolute SS (INDEX 00)
 					headerbuf[header_ptr + 5] = f;		// Absolute FF (INDEX 00)
@@ -939,7 +869,7 @@ int main(int argc, char **argv)
 
 				/* 2013/05/16 - v2.0, gap++ */
 
-				if(params.gap_more == 1) {
+				if(gap_more == 1) {
 					/* INDEX 00 : + 2 SEC */
 					if((i != 0) && (headerbuf[header_ptr + 4] == 0x08 || headerbuf[header_ptr + 4] == 0x09 || headerbuf[header_ptr + 4] == 0x18 || headerbuf[header_ptr + 4] == 0x19 || headerbuf[header_ptr + 4] == 0x28 || headerbuf[header_ptr + 4] == 0x29 || headerbuf[header_ptr + 4] == 0x38 || headerbuf[header_ptr + 4] == 0x39 || headerbuf[header_ptr + 4] == 0x48 || headerbuf[header_ptr + 4] == 0x49) && (headerbuf[header_ptr + 4] != 0x58 || headerbuf[header_ptr + 4] != 0x59)) {
 						headerbuf[header_ptr + 4] += 8; // HEX -> DEC (+ 2 SEC)
@@ -986,7 +916,7 @@ int main(int argc, char **argv)
 
 				/* 2013/05/16 - v2.0, gap-- */
 
-				if(params.gap_less == 1) {
+				if(gap_less == 1) {
 					/* INDEX 00 : - 2 SEC */
 					if((i != 0) && (headerbuf[header_ptr + 4] == 0x10 || headerbuf[header_ptr + 4] == 0x11 || headerbuf[header_ptr + 4] == 0x20 || headerbuf[header_ptr + 4] == 0x21 || headerbuf[header_ptr + 4] == 0x30 || headerbuf[header_ptr + 4] == 0x31 || headerbuf[header_ptr + 4] == 0x40 || headerbuf[header_ptr + 4] == 0x41 || headerbuf[header_ptr + 4] == 0x50 || headerbuf[header_ptr + 4] == 0x51) && (headerbuf[header_ptr + 4] != 0x00 || headerbuf[header_ptr + 4] != 0x01)) {
 						headerbuf[header_ptr + 4] += 8; // HEX -> DEC (- 2 SEC)
@@ -1028,39 +958,32 @@ int main(int argc, char **argv)
 				}
 
 				/* 2013/05/16 - v2.0, End of the gap-- code */
+
+
 				gap_ptr = 0; // Reset the integer that points to the last NULLed INDEX 00 entry of the cue sheet
+
 				break;
 			}
 		}
 	}
-	free(cue_buf);
+	free(cuebuf);
 
-	bin_size = get_file_size(bin_path);
-	if (bin_size < 0) {
-		free(bin_path);
+	if(GetLeadOut() != 1) {
+		free(dumpaddr);
 		free(headerbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	if(get_lead_out(headerbuf, bin_size, &sector_count) != 0) {
-		free(bin_path);
-		free(headerbuf);
-		return 0;
-	}
-
-	if(noCDDA == 1) {
-		daTrack_ptr = bin_size; // 2013/04/22 - v1.2 : Set it now. If no CDDA track was found in the game dump, the NTSC patcher will proceed in scanning the whole BIN.
-	}
+	if(noCDDA == 1) daTrack_ptr = dumpsize; // 2013/04/22 - v1.2 : Set it now. If no CDDA track was found in the game dump, the NTSC patcher will proceed in scanning the whole BIN.
 	if(noCDDA == 1 && debug != 0) {			// 2013/05/16 - v2.0 : dbg please
 		printf("Current daTrack_ptr     = %d (%Xh)\n", daTrack_ptr, daTrack_ptr);
-		printf("daTrack_ptr LBA         = %d (%Xh)\n\n", daTrack_ptr / SECTORSIZE, daTrack_ptr / SECTORSIZE);
+		printf("daTrack_ptr LBA         = %d (%Xh)\n\n", daTrack_ptr / sectorsize, daTrack_ptr / sectorsize);
 	}
 
-	if (sizeof(sector_count) != 4) {
-		printf("Error: sector_count variable is not 4 bytes. This will break the header generation.\n");
-		return 0;
-	}
-
+	headerbuf[27] = LeadOut[0]; //Lead-Out MM
+	headerbuf[28] = LeadOut[1]; //Lead-Out SS
+	headerbuf[29] = LeadOut[2]; //Lead-Out FF
 	memcpy(headerbuf + 1032, &sector_count, 4); // Sector Count (LEHEX)
 	memcpy(headerbuf + 1036, &sector_count, 4); // Sector Count (LEHEX)
 
@@ -1069,111 +992,437 @@ int main(int argc, char **argv)
 	headerbuf[1026] = 0x6E;
 	headerbuf[1027] = 0x20;	// 2013/05/16 - v2.0 : CUE2POPS ver ident
 
-	outbuf = malloc(HEADERSIZE);
-	if (outbuf == NULL) {
-		printf("Failed to allocate output buffer\n");
-		free(bin_path);
+	/* 2 user arguments : no command, output file is user argument 2 */
+	if(gap_more == 0 && gap_less == 0 && vmode == 0 && trainer == 0 && argc == 3) {
+		printf("Saving the virtual CD-ROM image. Please wait...\n");
+		if(!(file = fopen(argv[2], "wb"))) {
+			printf("Error : Cannot write to %s\n\n", argv[2]);
+			free(dumpaddr);
+			free(headerbuf);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		fwrite(headerbuf, 1, headersize, file);
+		fclose(file);
 		free(headerbuf);
-		return 0;
+
+
+		if(!(file = fopen(argv[2], "ab+"))) {
+			printf("Error : Cannot write to %s\n\n", argv[2]);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+
+		if(!(leech = fopen(dumpaddr, "rb"))) {
+			printf("Error: Cannot open %s\n\n", dumpaddr);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		free(dumpaddr);
+
+		for(i = 0; i < dumpsize; i += headersize) {
+			if(fix_CDRWIN == 1 && (i + headersize >= daTrack_ptr)) {
+				if(debug != 0) printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
+				fread(outbuf, headersize - (i + headersize - daTrack_ptr), 1, leech);
+				fwrite(outbuf, headersize - (i + headersize - daTrack_ptr), 1, file);
+				char padding[(150 * sectorsize) * 2];
+				fwrite(padding, 150 * sectorsize, 1, file);
+				fread(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, leech);
+				fwrite(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, file);
+				fix_CDRWIN = 0;
+				if(debug != 0) {
+					printf(" Done.\n");
+					printf("Continuing...\n");
+				}
+				//if(vmode == 1) printf("----------------------------------------------------------------------------------\n");
+			} else {
+				if(vmode == 1 && i == 0) {
+					printf("----------------------------------------------------------------------------------\n");
+					printf("NTSC Patcher is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				fread(outbuf, headersize, 1, leech);
+				if(i == 0) GameIdentifier(outbuf);
+				if(GameTitle >= 0 && GameHasCheats == 1 && trainer == 1 && i == 0) {
+					printf("GameTrainer is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				if(GameTitle >= 0 && GameTrained == 0 && GameHasCheats == 1 && trainer == 1 && i <= daTrack_ptr) GameTrainer(outbuf);
+				if(GameTitle >= 0 && GameFixed == 0 && fix_game == 1 && i <= daTrack_ptr) GameFixer(outbuf);
+				if(vmode == 1 && i <= daTrack_ptr) NTSCpatcher(outbuf, i);
+				if(i + headersize >= dumpsize) {
+					fwrite(outbuf, headersize - (i + headersize - dumpsize), 1, file);
+				} else fwrite(outbuf, headersize, 1, file);
+			}
+		}
+		if(GameTitle >= 0 && fix_game == 1 && GameFixed == 0) {
+			printf("COULD NOT APPLY THE GAME FIXE(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		if(GameTitle >= 0 && GameHasCheats == 1 && GameTrained == 0 && trainer == 1) {
+			printf("COULD NOT APPLY THE GAME CHEAT(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		fclose(leech);
+		fclose(file);
+
+		printf("A POPS virtual CD-ROM image was saved to :\n");
+		printf("%s\n\n", argv[2]);
+		//if(batch == 0) system("pause");
+		return 1;
+	}
+
+	/* 3 user arguments : 1 command, the command is user argument 2, output file is user argument 3 */
+	if(((gap_more == 0 && vmode == 0 && trainer == 1) || (gap_less == 0 && vmode == 0 && trainer == 1) || (gap_more == 1 && vmode == 0 && trainer == 0) || (gap_less == 1 && vmode == 0 && trainer == 0) || (gap_more == 0 && gap_less == 0 && vmode == 1 && trainer == 0)) && argc == 4) {
+		printf("Saving the virtual CD-ROM image. Please wait...\n");
+		if(!(file = fopen(argv[3], "wb"))) {
+			printf("Error : Cannot write to %s\n\n", argv[3]);
+			free(dumpaddr);
+			free(headerbuf);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		fwrite(headerbuf, 1, headersize, file);
+		fclose(file);
+		free(headerbuf);
+
+
+		if(!(file = fopen(argv[3], "ab+"))) {
+			printf("Error : Cannot write to %s\n\n", argv[3]);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+
+		if(!(leech = fopen(dumpaddr, "rb"))) {
+			printf("Error: Cannot open %s\n\n", dumpaddr);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		free(dumpaddr);
+
+		for(i = 0; i < dumpsize; i += headersize) {
+			if(fix_CDRWIN == 1 && (i + headersize >= daTrack_ptr)) {
+				if(debug != 0) printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
+				fread(outbuf, headersize - (i + headersize - daTrack_ptr), 1, leech);
+				fwrite(outbuf, headersize - (i + headersize - daTrack_ptr), 1, file);
+				char padding[(150 * sectorsize) * 2];
+				fwrite(padding, 150 * sectorsize, 1, file);
+				fread(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, leech);
+				fwrite(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, file);
+				fix_CDRWIN = 0;
+				if(debug != 0) {
+					printf(" Done.\n");
+					printf("Continuing...\n");
+				}
+				//if(vmode == 1) printf("----------------------------------------------------------------------------------\n");
+			} else {
+				if(vmode == 1 && i == 0) {
+					printf("----------------------------------------------------------------------------------\n");
+					printf("NTSC Patcher is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				fread(outbuf, headersize, 1, leech);
+				if(i == 0) GameIdentifier(outbuf);
+				if(GameTitle >= 0 && GameHasCheats == 1 && trainer == 1 && i == 0) {
+					printf("GameTrainer is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				if(GameTitle >= 0 && GameTrained == 0 && GameHasCheats == 1 && trainer == 1 && i <= daTrack_ptr) GameTrainer(outbuf);
+				if(GameTitle >= 0 && GameFixed == 0 && fix_game == 1 && i <= daTrack_ptr) GameFixer(outbuf);
+				if(vmode == 1 && i <= daTrack_ptr) NTSCpatcher(outbuf, i);
+				if(i + headersize >= dumpsize) {
+					fwrite(outbuf, headersize - (i + headersize - dumpsize), 1, file);
+				} else fwrite(outbuf, headersize, 1, file);
+			}
+		}
+		if(GameTitle >= 0 && fix_game == 1 && GameFixed == 0) {
+			printf("COULD NOT APPLY THE GAME FIXE(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		if(GameTitle >= 0 && GameHasCheats == 1 && GameTrained == 0 && trainer == 1) {
+			printf("COULD NOT APPLY THE GAME CHEAT(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		fclose(leech);
+		fclose(file);
+
+		printf("A POPS virtual CD-ROM image was saved to :\n");
+		printf("%s\n\n", argv[3]);
+		//if(batch == 0) system("pause");
+		return 1;
+	}
+
+	/* 4 user arguments : 2 commands, commands are user arguments 2 and 3, output file is user argument 4 */
+	if(((gap_more == 1 && vmode == 0 && trainer == 1) || (gap_less == 1 && vmode == 0 && trainer == 1) || (gap_more == 1 && vmode == 1 && trainer == 0) || (gap_less == 1 && vmode == 1 && trainer == 0) || (gap_more == 0 && gap_less == 0 && vmode == 1 && trainer == 1)) && argc == 5) {
+		printf("Saving the virtual CD-ROM image. Please wait...\n");
+		if(!(file = fopen(argv[4], "wb"))) {
+			printf("Error : Cannot write to %s\n\n", argv[4]);
+			free(dumpaddr);
+			free(headerbuf);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		fwrite(headerbuf, 1, headersize, file);
+		fclose(file);
+		free(headerbuf);
+
+
+		if(!(file = fopen(argv[4], "ab+"))) {
+			printf("Error : Cannot write to %s\n\n", argv[4]);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+
+		if(!(leech = fopen(dumpaddr, "rb"))) {
+			printf("Error: Cannot open %s\n\n", dumpaddr);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		free(dumpaddr);
+
+		for(i = 0; i < dumpsize; i += headersize) {
+			if(fix_CDRWIN == 1 && (i + headersize >= daTrack_ptr)) {
+				if(debug != 0) printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
+				fread(outbuf, headersize - (i + headersize - daTrack_ptr), 1, leech);
+				fwrite(outbuf, headersize - (i + headersize - daTrack_ptr), 1, file);
+				char padding[(150 * sectorsize) * 2];
+				fwrite(padding, 150 * sectorsize, 1, file);
+				fread(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, leech);
+				fwrite(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, file);
+				fix_CDRWIN = 0;
+				if(debug != 0) {
+					printf(" Done.\n");
+					printf("Continuing...\n");
+				}
+				//if(vmode == 1) printf("----------------------------------------------------------------------------------\n");
+			} else {
+				if(vmode == 1 && i == 0) {
+					printf("----------------------------------------------------------------------------------\n");
+					printf("NTSC Patcher is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				fread(outbuf, headersize, 1, leech);
+				if(i == 0) GameIdentifier(outbuf);
+				if(GameTitle >= 0 && GameHasCheats == 1 && trainer == 1 && i == 0) {
+					printf("GameTrainer is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				if(GameTitle >= 0 && GameTrained == 0 && GameHasCheats == 1 && trainer == 1 && i <= daTrack_ptr) GameTrainer(outbuf);
+				if(GameTitle >= 0 && GameFixed == 0 && fix_game == 1 && i <= daTrack_ptr) GameFixer(outbuf);
+				if(vmode == 1 && i <= daTrack_ptr) NTSCpatcher(outbuf, i);
+				if(i + headersize >= dumpsize) {
+					fwrite(outbuf, headersize - (i + headersize - dumpsize), 1, file);
+				} else fwrite(outbuf, headersize, 1, file);
+			}
+		}
+		if(GameTitle >= 0 && fix_game == 1 && GameFixed == 0) {
+			printf("COULD NOT APPLY THE GAME FIXE(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		if(GameTitle >= 0 && GameHasCheats == 1 && GameTrained == 0 && trainer == 1) {
+			printf("COULD NOT APPLY THE GAME CHEAT(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		fclose(leech);
+		fclose(file);
+
+		printf("A POPS virtual CD-ROM image was saved to :\n");
+		printf("%s\n\n", argv[4]);
+		//if(batch == 0) system("pause");
+		return 1;
+	}
+
+	/* 5 user arguments : 3 commands; Commands are user arguments 2, 3 and 4; Output file is user argument 5 */
+	if(argc == 6) {
+		printf("Saving the virtual CD-ROM image. Please wait...\n");
+		if(!(file = fopen(argv[5], "wb"))) {
+			printf("Error : Cannot write to %s\n\n", argv[5]);
+			free(dumpaddr);
+			free(headerbuf);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		fwrite(headerbuf, 1, headersize, file);
+		fclose(file);
+		free(headerbuf);
+
+
+		if(!(file = fopen(argv[5], "ab+"))) {
+			printf("Error : Cannot write to %s\n\n", argv[5]);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+
+		if(!(leech = fopen(dumpaddr, "rb"))) {
+			printf("Error: Cannot open %s\n\n", dumpaddr);
+			free(dumpaddr);
+			//if(batch == 0) system("pause");
+			return 0;
+		}
+		free(dumpaddr);
+
+		for(i = 0; i < dumpsize; i += headersize) {
+			if(fix_CDRWIN == 1 && (i + headersize >= daTrack_ptr)) {
+				if(debug != 0) printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
+				fread(outbuf, headersize - (i + headersize - daTrack_ptr), 1, leech);
+				fwrite(outbuf, headersize - (i + headersize - daTrack_ptr), 1, file);
+				char padding[(150 * sectorsize) * 2];
+				fwrite(padding, 150 * sectorsize, 1, file);
+				fread(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, leech);
+				fwrite(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, file);
+				fix_CDRWIN = 0;
+				if(debug != 0) {
+					printf(" Done.\n");
+					printf("Continuing...\n");
+				}
+				//if(vmode == 1) printf("----------------------------------------------------------------------------------\n");
+			} else {
+				if(vmode == 1 && i == 0) {
+					printf("----------------------------------------------------------------------------------\n");
+					printf("NTSC Patcher is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				fread(outbuf, headersize, 1, leech);
+				if(i == 0) GameIdentifier(outbuf);
+				if(GameTitle >= 0 && GameHasCheats == 1 && trainer == 1 && i == 0) {
+					printf("GameTrainer is ON\n");
+					printf("----------------------------------------------------------------------------------\n");
+				}
+				if(GameTitle >= 0 && GameTrained == 0 && GameHasCheats == 1 && trainer == 1 && i <= daTrack_ptr) GameTrainer(outbuf);
+				if(GameTitle >= 0 && GameFixed == 0 && fix_game == 1 && i <= daTrack_ptr) GameFixer(outbuf);
+				if(vmode == 1 && i <= daTrack_ptr) NTSCpatcher(outbuf, i);
+				if(i + headersize >= dumpsize) {
+					fwrite(outbuf, headersize - (i + headersize - dumpsize), 1, file);
+				} else fwrite(outbuf, headersize, 1, file);
+			}
+		}
+		if(GameTitle >= 0 && fix_game == 1 && GameFixed == 0) {
+			printf("COULD NOT APPLY THE GAME FIXE(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		if(GameTitle >= 0 && GameHasCheats == 1 && GameTrained == 0 && trainer == 1) {
+			printf("COULD NOT APPLY THE GAME CHEAT(S) : No data to patch found\n");
+			printf("----------------------------------------------------------------------------------\n");
+		}
+		fclose(leech);
+		fclose(file);
+
+		printf("A POPS virtual CD-ROM image was saved to :\n");
+		printf("%s\n\n", argv[5]);
+		//if(batch == 0) system("pause");
+		return 1;
+	}
+
+
+	/* Default, if none of the above cases returned or argc == 2, output file is the input file name plus the extension ".VCD" */
+	i = strlen(argv[1]);
+	for(i = i; i > 0; i--) { // Search the extension ".cue" and ".CUE" in the input file name
+		if((argv[1][i] == '.' && argv[1][i+1] == 'c' && argv[1][i+2] == 'u' && argv[1][i+3] == 'e') || (argv[1][i] == '.' && argv[1][i+1] == 'C' && argv[1][i+2] == 'U' && argv[1][i+3] == 'E'))
+		break;
+	}
+	if(i >= 0) { // Found extension ".cue" or ".CUE", replace it with ".VCD"
+		if(argv[1][i] == '"') argv[1][i + 4] = '"';
+		else argv[1][i + 4] = '\0';
+		argv[1][i + 1] = 'V';
+		argv[1][i + 2] = 'C';
+		argv[1][i + 3] = 'D';
+	} else { // Extension ".cue" or ".CUE" not found, put ".VCD" at the end of the input file name
+		i = strlen(argv[1]);
+		if(argv[1][i] == '"') argv[1][i + 4] = '"';
+		else argv[1][i + 4] = '\0';
+		argv[1][i] = '.';
+		argv[1][i + 1] = 'V';
+		argv[1][i + 2] = 'C';
+		argv[1][i + 3] = 'D';
 	}
 
 	printf("Saving the virtual CD-ROM image. Please wait...\n");
-	if(!(vcd_file = fopen(vcd_name, "wb"))) {
-		printf("Error: Cannot write to %s\n\n", vcd_name);
-		free(bin_path);
+	if(!(file = fopen(argv[1], "wb"))) {
+		printf("Error : Cannot write to %s\n\n", argv[1]);
+		free(dumpaddr);
 		free(headerbuf);
-		free(outbuf);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
-	fwrite(headerbuf, 1, HEADERSIZE, vcd_file);
-	fclose(vcd_file);
+	fwrite(headerbuf, 1, headersize, file);
+	fclose(file);
 	free(headerbuf);
 
-	if(!(vcd_file = fopen(vcd_name, "ab+"))) {
-		printf("Error: Cannot write to %s\n\n", vcd_name);
-		free(bin_path);
-		free(outbuf);
+
+	if(!(file = fopen(argv[1], "ab+"))) {
+		printf("Error : Cannot write to %s\n\n", argv[1]);
+		free(dumpaddr);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
 
-	if(!(bin_file = fopen(bin_path, "rb"))) {
-		printf("Error: Cannot open %s\n\n", bin_path);
-		free(bin_path);
-		free(outbuf);
+	if(!(leech = fopen(dumpaddr, "rb"))) {
+		printf("Error: Cannot open %s\n\n", dumpaddr);
+		free(dumpaddr);
+		//if(batch == 0) system("pause");
 		return 0;
 	}
-	free(bin_path);
+	free(dumpaddr);
 
-	for(i = 0; i < bin_size; i += HEADERSIZE) {
-		if(fix_CDRWIN == 1 && (i + HEADERSIZE >= daTrack_ptr)) {
-			char *padding;
-
-			padding = malloc((150 * SECTORSIZE) * 2);
-			if (padding == NULL) {
-				printf("Failed to allocate padding.\n");
-				free(outbuf);
-				return 0;
-			}
-
-			if(debug != 0) {
-				printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
-			}
-			fread(outbuf, HEADERSIZE - (i + HEADERSIZE - daTrack_ptr), 1, bin_file);
-			fwrite(outbuf, HEADERSIZE - (i + HEADERSIZE - daTrack_ptr), 1, vcd_file);
-			fwrite(padding, 150 * SECTORSIZE, 1, vcd_file);
-			fread(outbuf, HEADERSIZE - (HEADERSIZE - (i + HEADERSIZE - daTrack_ptr)), 1, bin_file);
-			fwrite(outbuf, HEADERSIZE - (HEADERSIZE - (i + HEADERSIZE - daTrack_ptr)), 1, vcd_file);
+	for(i = 0; i < dumpsize; i += headersize) {
+		if(fix_CDRWIN == 1 && (i + headersize >= daTrack_ptr)) {
+			if(debug != 0) printf("Padding the CDRWIN dump inside of the virtual CD-ROM image...");
+			fread(outbuf, headersize - (i + headersize - daTrack_ptr), 1, leech);
+			fwrite(outbuf, headersize - (i + headersize - daTrack_ptr), 1, file);
+			char padding[(150 * sectorsize) * 2];
+			fwrite(padding, 150 * sectorsize, 1, file);
+			fread(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, leech);
+			fwrite(outbuf, headersize - (headersize - (i + headersize - daTrack_ptr)), 1, file);
 			fix_CDRWIN = 0;
 			if(debug != 0) {
 				printf(" Done.\n");
 				printf("Continuing...\n");
 			}
+			//if(vmode == 1) printf("----------------------------------------------------------------------------------\n");
 		} else {
-			if(params.vmode == 1 && i == 0) {
+			if(vmode == 1 && i == 0) {
 				printf("----------------------------------------------------------------------------------\n");
 				printf("NTSC Patcher is ON\n");
 				printf("----------------------------------------------------------------------------------\n");
 			}
-			fread(outbuf, HEADERSIZE, 1, bin_file);
-			if(i == 0) {
-				game_identifier(outbuf, &params);
-			}
-			if(params.game_title >= 0 && params.game_has_cheats == 1 && params.trainer == 1 && i == 0) {
-				printf("game_trainer is ON\n");
+			fread(outbuf, headersize, 1, leech);
+			if(i == 0) GameIdentifier(outbuf);
+			if(GameTitle >= 0 && GameHasCheats == 1 && trainer == 1 && i == 0) {
+				printf("GameTrainer is ON\n");
 				printf("----------------------------------------------------------------------------------\n");
 			}
-			if(params.game_title >= 0 && params.game_trained == 0 && params.game_has_cheats == 1 && params.trainer == 1 && i <= daTrack_ptr) {
-				game_trainer(outbuf, &params);
-			}
-			if(params.game_title >= 0 && params.game_fixed == 0 && params.fix_game == 1 && i <= daTrack_ptr) {
-				game_fixer(outbuf, &params);
-			}
-			if(params.vmode == 1 && i <= daTrack_ptr) {
-				NTSC_patcher(outbuf, i, &params);
-			}
-			if(i + HEADERSIZE >= bin_size) {
-				fwrite(outbuf, HEADERSIZE - (i + HEADERSIZE - bin_size), 1, vcd_file);
-			} else {
-				fwrite(outbuf, HEADERSIZE, 1, vcd_file);
-			}
+			if(GameTitle >= 0 && GameTrained == 0 && GameHasCheats == 1 && trainer == 1 && i <= daTrack_ptr) GameTrainer(outbuf);
+			if(GameTitle >= 0 && GameFixed == 0 && fix_game == 1 && i <= daTrack_ptr) GameFixer(outbuf);
+			if(vmode == 1 && i <= daTrack_ptr) NTSCpatcher(outbuf, i);
+			if(i + headersize >= dumpsize) {
+				fwrite(outbuf, headersize - (i + headersize - dumpsize), 1, file);
+			} else fwrite(outbuf, headersize, 1, file);
 		}
 	}
-	if(params.game_title >= 0 && params.fix_game == 1 && params.game_fixed == 0) {
+	if(GameTitle >= 0 && fix_game == 1 && GameFixed == 0) {
 		printf("COULD NOT APPLY THE GAME FIXE(S) : No data to patch found\n");
 		printf("----------------------------------------------------------------------------------\n");
 	}
-	if(params.game_title >= 0 && params.game_has_cheats == 1 && params.game_trained == 0 && params.trainer == 1) {
+	if(GameTitle >= 0 && GameHasCheats == 1 && GameTrained == 0 && trainer == 1) {
 		printf("COULD NOT APPLY THE GAME CHEAT(S) : No data to patch found\n");
 		printf("----------------------------------------------------------------------------------\n");
 	}
-
-	free(outbuf);
-	fclose(bin_file);
-	fclose(vcd_file);
+	fclose(leech);
+	fclose(file);
 
 	printf("A POPS virtual CD-ROM image was saved to :\n");
-	printf("%s\n\n", vcd_name);
-	return 1;
+	printf("%s\n\n", argv[1]);
+        printf("Happy Gaming! If any issues, just visit http://www.ps2-home.com for help\n\n.");
 
+	//if(batch == 0) system("pause");
+
+	return 1;
 }
 /* EOSRC, oh mah dayum */
